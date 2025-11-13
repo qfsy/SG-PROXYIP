@@ -7,11 +7,6 @@
   "max_response_time": 800,
   "cloudflare": {
     "ttl": 120,
-    "proxied": true
-  },
-  "telegram": {
-    "bot_token": "",
-    "chat_id": ""
+    "proxied": false
   }
 }
-

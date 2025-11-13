@@ -2,16 +2,16 @@ import os
 import json
 import asyncio
 import aiohttp
-from aiohttp import ClientTimeout
+import socket
 import requests
+from aiohttp import ClientTimeout
 
-# ---------- 配置 ----------
 CONFIG_FILE = "sg-proxyip.json"
 
+# ---------- 读取 JSON 配置 ----------
 with open(CONFIG_FILE, "r") as f:
     cfg = json.load(f)
 
-# 非敏感配置从 JSON 获取
 MAX_RESPONSE_TIME = int(os.environ.get("MAX_RESPONSE_TIME", cfg.get("max_response_time", 800)))
 CONCURRENCY = int(cfg.get("concurrency", 4))
 TIMEOUT = int(cfg.get("timeout_seconds", 6))
@@ -22,11 +22,10 @@ PROXIED = cfg["cloudflare"].get("proxied", False)
 RESOLVE_DOMAIN = cfg["resolve_domain"]
 CHECK_URL_TEMPLATE = cfg["check_url_template"]
 
-# ---------- 敏感信息从 Secrets 获取 ----------
+# ---------- 从 Secrets 获取敏感信息 ----------
 CF_API_TOKEN = os.environ.get("CF_API_TOKEN")
 ZONE_NAME = os.environ.get("CF_ZONE_NAME")
 RECORD_NAME = os.environ.get("CF_RECORD_NAME")
-
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID")
 
@@ -66,33 +65,29 @@ async def check_ip(session, ip):
             continue
     return None
 
-async def resolve_ips():
-    url = f"https://cloudflare-dns.com/dns-query?name={RESOLVE_DOMAIN}&type=A"
-    headers = {"Accept": "application/dns-json"}
-    async with aiohttp.ClientSession(headers=headers) as session:
-        data = await fetch_json(session, url)
-        if not data or "Answer" not in data:
-            return []
-        ips = list({a["data"] for a in data["Answer"]})
-        return ips[:200]
+def resolve_ips_socket(domain):
+    """使用系统 DNS 解析域名"""
+    try:
+        _, _, ips = socket.gethostbyname_ex(domain)
+        return list(set(ips))[:200]
+    except:
+        return []
 
 async def get_current_cf_ip():
     headers = {"Authorization": f"Bearer {CF_API_TOKEN}"}
-    async with aiohttp.ClientSession(headers=headers) as session:
-        # 获取 zone id
-        url = f"https://api.cloudflare.com/client/v4/zones?name={ZONE_NAME}"
-        j = await fetch_json(session, url)
-        if not j or not j.get("result"):
-            return None, None, None
-        zone_id = j["result"][0]["id"]
-
-        # 获取 record
-        url2 = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records?name={RECORD_NAME}"
-        j2 = await fetch_json(session, url2)
-        if not j2 or not j2.get("result"):
-            return zone_id, None, None
-        record = j2["result"][0]
-        return zone_id, record["id"], record["content"]
+    # 获取 zone id
+    url = f"https://api.cloudflare.com/client/v4/zones?name={ZONE_NAME}"
+    j = requests.get(url, headers=headers, timeout=TIMEOUT).json()
+    if not j.get("result"):
+        return None, None, None
+    zone_id = j["result"][0]["id"]
+    # 获取 record
+    url2 = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records?name={RECORD_NAME}"
+    j2 = requests.get(url2, headers=headers, timeout=TIMEOUT).json()
+    if not j2.get("result"):
+        return zone_id, None, None
+    record = j2["result"][0]
+    return zone_id, record["id"], record["content"]
 
 def update_cf_dns(zone_id, record_id, ip):
     url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{record_id}" if record_id else f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records"
@@ -106,18 +101,22 @@ def update_cf_dns(zone_id, record_id, ip):
 
 # ---------- 主流程 ----------
 async def main():
+    if not CF_API_TOKEN or not ZONE_NAME or not RECORD_NAME:
+        await notify_tg("❌ CF 配置未设置完整（TOKEN/ZONE/RECORD）")
+        return
+
     zone_id, record_id, current_ip = await get_current_cf_ip()
 
     async with aiohttp.ClientSession() as session:
-        # 检测当前 IP
+        # 检测当前 CF IP
         if current_ip:
             rt = await check_ip(session, current_ip)
             if rt is not None and rt <= MAX_RESPONSE_TIME:
                 await notify_tg(f"✅ 当前 IP {current_ip} 正常（{rt}ms），无需更新。")
                 return
 
-        # 获取候选 IP
-        ips = await resolve_ips()
+        # 解析候选 IP
+        ips = resolve_ips_socket(RESOLVE_DOMAIN)
         if not ips:
             await notify_tg("❌ 未解析到候选 IP")
             return
@@ -131,7 +130,6 @@ async def main():
                 rt = await check_ip(session, ip)
                 if rt is not None:
                     results[ip] = rt
-                # 超时或异常直接跳过
 
         await asyncio.gather(*[check(ip) for ip in ips])
 
