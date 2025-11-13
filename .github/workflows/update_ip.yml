@@ -24,4 +24,4 @@ jobs:
           CF_RECORD_NAME: ${{ secrets.CF_RECORD_NAME }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-        run: python update_cf_ip.py
+        run: python SG-proxyip.py
