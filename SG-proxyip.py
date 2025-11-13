@@ -50,19 +50,23 @@ async def fetch_json(session, url):
         return None
 
 async def check_ip(session, ip):
-    url = CHECK_URL_TEMPLATE.format(ip)
-    for _ in range(RETRIES):
-        try:
-            data = await fetch_json(session, url)
-            if isinstance(data, list):
-                valid = [x for x in data if x.get("success") in [True, "true"] and "responseTime" in x]
-                if valid:
-                    min_rt = min(float(x["responseTime"]) for x in valid)
-                    return min_rt
-        except asyncio.TimeoutError:
+    url = CHECK_URL.format(ip)
+    data = await fetch_json(session, url)
+    if not data:
+        return None
+
+    # 若返回为对象而非数组
+    if isinstance(data, dict):
+        if data.get("success") is True and 0 < data.get("responseTime", 9999) <= MAX_RESPONSE_TIME:
+            return ip
+        else:
             return None
-        except:
-            continue
+
+    # 若返回数组（兼容旧结构）
+    if isinstance(data, list):
+        for e in data:
+            if e.get("success") is True and e.get("responseTime", 9999) <= MAX_RESPONSE_TIME:
+                return ip
     return None
 
 def resolve_ips_socket(domain):
