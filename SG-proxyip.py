@@ -16,8 +16,8 @@ MAX_RESPONSE_TIME = int(os.environ.get("MAX_RESPONSE_TIME", cfg.get("max_respons
 CONCURRENCY = int(cfg.get("concurrency", 4))
 TIMEOUT = int(cfg.get("timeout_seconds", 6))
 RETRIES = int(cfg.get("retries", 2))
-TTL = int(cfg.get("cloudflare", {}).get("ttl", 120))
-PROXIED = bool(cfg.get("cloudflare", {}).get("proxied", False))
+TTL = int(cfg["cloudflare"].get("ttl", 120))
+PROXIED = cfg["cloudflare"].get("proxied", False)
 
 RESOLVE_DOMAIN = cfg["resolve_domain"]
 CHECK_URL_TEMPLATE = cfg["check_url_template"]
@@ -30,91 +30,79 @@ TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID")
 
 # ---------- Helper ----------
-async def notify_tg(message: str):
-    """Telegram 推送"""
+async def notify_tg(message):
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         return
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TG_CHAT_ID, "text": message}
-    try:
-        async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession() as session:
+        try:
             async with session.post(url, json=payload, timeout=5):
                 pass
-    except:
-        pass
-
+        except:
+            pass
 
 async def fetch_json(session, url):
-    """通用 GET JSON"""
     try:
         async with session.get(url, timeout=ClientTimeout(total=TIMEOUT)) as resp:
             return await resp.json()
-    except Exception:
+    except:
         return None
 
-
 async def check_ip(session, ip):
-    """检测候选 IP"""
     url = CHECK_URL_TEMPLATE.format(ip)
     data = await fetch_json(session, url)
     if not data:
         return None
 
+    # 若返回为对象
     if isinstance(data, dict):
-        if data.get("success") and 0 < data.get("responseTime", 9999) <= MAX_RESPONSE_TIME:
+        if data.get("success") is True and 0 < data.get("responseTime", 9999) <= MAX_RESPONSE_TIME:
             return data.get("responseTime")
-        return None
+        else:
+            return None
 
+    # 若返回数组
     if isinstance(data, list):
         for e in data:
-            if e.get("success") and 0 < e.get("responseTime", 9999) <= MAX_RESPONSE_TIME:
+            if e.get("success") is True and 0 < e.get("responseTime", 9999) <= MAX_RESPONSE_TIME:
                 return e.get("responseTime")
     return None
 
-
 def resolve_ips_socket(domain):
-    """使用系统 DNS 解析域名"""
+    """使用系统 DNS 解析域名，只返回该域名的 IP"""
     try:
         _, _, ips = socket.gethostbyname_ex(domain)
-        return list(set(ips))[:200]
+        ips = list(set(ips))[:200]
+        return ips
     except:
         return []
 
-
 async def get_current_cf_ip():
-    """获取当前 Cloudflare 记录 IP"""
     headers = {"Authorization": f"Bearer {CF_API_TOKEN}"}
-    try:
-        z = requests.get(f"https://api.cloudflare.com/client/v4/zones?name={ZONE_NAME}", headers=headers, timeout=TIMEOUT).json()
-        if not z.get("result"):
-            return None, None, None
-        zone_id = z["result"][0]["id"]
-
-        r = requests.get(f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records?name={RECORD_NAME}", headers=headers, timeout=TIMEOUT).json()
-        if not r.get("result"):
-            return zone_id, None, None
-        record = r["result"][0]
-        return zone_id, record["id"], record["content"]
-    except:
+    # 获取 zone id
+    url = f"https://api.cloudflare.com/client/v4/zones?name={ZONE_NAME}"
+    j = requests.get(url, headers=headers, timeout=TIMEOUT).json()
+    if not j.get("result"):
         return None, None, None
-
+    zone_id = j["result"][0]["id"]
+    # 获取 record
+    url2 = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records?name={RECORD_NAME}"
+    j2 = requests.get(url2, headers=headers, timeout=TIMEOUT).json()
+    if not j2.get("result"):
+        return zone_id, None, None
+    record = j2["result"][0]
+    return zone_id, record["id"], record["content"]
 
 def update_cf_dns(zone_id, record_id, ip):
-    """更新 Cloudflare DNS"""
-    headers = {
-        "Authorization": f"Bearer {CF_API_TOKEN}",
-        "Content-Type": "application/json"
-    }
+    url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{record_id}" if record_id else f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records"
+    method = requests.put if record_id else requests.post
     data = {"type": "A", "name": RECORD_NAME, "content": ip, "ttl": TTL, "proxied": PROXIED}
     try:
-        if record_id:
-            resp = requests.put(f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{record_id}", headers=headers, json=data, timeout=TIMEOUT)
-        else:
-            resp = requests.post(f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records", headers=headers, json=data, timeout=TIMEOUT)
+        resp = method(url, headers={"Authorization": f"Bearer {CF_API_TOKEN}", "Content-Type": "application/json"}, json=data, timeout=TIMEOUT)
         return resp.status_code in [200, 201]
     except:
         return False
-
 
 # ---------- 主流程 ----------
 async def main():
@@ -123,15 +111,12 @@ async def main():
         return
 
     zone_id, record_id, current_ip = await get_current_cf_ip()
-    if not zone_id:
-        await notify_tg("❌ 无法获取 Cloudflare Zone 信息")
-        return
 
     async with aiohttp.ClientSession() as session:
-        # 检测当前 CF IP 是否仍然可用
+        # 检测当前 CF IP
         if current_ip:
             rt = await check_ip(session, current_ip)
-            if rt is not None:
+            if rt is not None and rt <= MAX_RESPONSE_TIME:
                 await notify_tg(f"✅ 当前 IP {current_ip} 正常（{rt}ms），无需更新。")
                 return
 
@@ -154,16 +139,15 @@ async def main():
         await asyncio.gather(*[check(ip) for ip in ips])
 
         if not results:
-            await notify_tg("❌ 没有可用的候选 IP（全部超时或无响应）")
+            await notify_tg("❌ 没有可用的候选 IP")
             return
 
         best_ip = min(results, key=lambda k: results[k])
         success = update_cf_dns(zone_id, record_id, best_ip)
         if success:
-            await notify_tg(f"⚡ DNS 更新成功：{RECORD_NAME} → {best_ip} （{results[best_ip]}ms）")
+            await notify_tg(f"⚡ DNS 更新成功：{RECORD_NAME} → {best_ip}")
         else:
             await notify_tg("❌ 更新 CF DNS 失败")
-
 
 if __name__ == "__main__":
     asyncio.run(main())
