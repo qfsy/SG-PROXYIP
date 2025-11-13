@@ -2,6 +2,7 @@ import os
 import json
 import asyncio
 import aiohttp
+import socket
 import requests
 from aiohttp import ClientTimeout
 
@@ -54,35 +55,63 @@ async def check_ip(session, ip):
     if not data:
         return None
 
-    # 若返回为对象而非数组
+    # 若返回为对象
     if isinstance(data, dict):
         if data.get("success") is True and 0 < data.get("responseTime", 9999) <= MAX_RESPONSE_TIME:
             return data.get("responseTime")
         else:
             return None
 
-    # 若返回数组（兼容旧结构）
+    # 若返回数组
     if isinstance(data, list):
         for e in data:
-            if e.get("success") is True and e.get("responseTime", 9999) <= MAX_RESPONSE_TIME:
+            if e.get("success") is True and 0 < e.get("responseTime", 9999) <= MAX_RESPONSE_TIME:
                 return e.get("responseTime")
     return None
 
-# ---------- 修改 DNS 解析部分 ----------
-async def resolve_ips(domain):
-    """使用 Cloudflare 公共 DNS-over-HTTPS 解析 A 记录"""
-    url = f"https://cloudflare-dns.com/dns-query?name={domain}&type=A"
-    async with aiohttp.ClientSession() as session:
+def resolve_ips_reliable(domain):
+    """使用多种方法可靠地解析域名IP"""
+    ips = []
+    
+    # 方法1: 使用socket.gethostbyname_ex
+    try:
+        _, _, socket_ips = socket.gethostbyname_ex(domain)
+        ips.extend(socket_ips)
+        print(f"Socket解析到IP: {socket_ips}")
+    except Exception as e:
+        print(f"Socket解析失败: {e}")
+    
+    # 方法2: 使用公共DNS解析 (Google DNS)
+    try:
+        import dns.resolver
+        resolver = dns.resolver.Resolver()
+        resolver.nameservers = ['8.8.8.8', '8.8.4.4']  # Google DNS
+        answers = resolver.resolve(domain, 'A')
+        dns_ips = [str(rdata) for rdata in answers]
+        ips.extend(dns_ips)
+        print(f"DNS解析到IP: {dns_ips}")
+    except Exception as e:
+        print(f"DNS解析失败: {e}")
+        # 如果dnspython不可用，使用requests查询公共DNS API
         try:
-            async with session.get(url, headers={'Accept':'application/dns-json'}, timeout=ClientTimeout(total=TIMEOUT)) as resp:
-                j = await resp.json()
-                if 'Answer' in j:
-                    return list(set(a['data'] for a in j['Answer']))[:200]
-        except:
-            return []
-    return []
+            doh_url = f"https://dns.google/resolve?name={domain}&type=A"
+            response = requests.get(doh_url, timeout=TIMEOUT)
+            if response.status_code == 200:
+                data = response.json()
+                doh_ips = []
+                for answer in data.get('Answer', []):
+                    if answer.get('type') == 1:  # A record
+                        doh_ips.append(answer['data'])
+                ips.extend(doh_ips)
+                print(f"DoH解析到IP: {doh_ips}")
+        except Exception as doh_e:
+            print(f"DoH解析失败: {doh_e}")
+    
+    # 去重并限制数量
+    ips = list(set(ips))[:200]
+    print(f"最终解析到的IP列表: {ips}")
+    return ips
 
-# ---------- CF 操作 ----------
 async def get_current_cf_ip():
     headers = {"Authorization": f"Bearer {CF_API_TOKEN}"}
     # 获取 zone id
@@ -125,11 +154,14 @@ async def main():
                 await notify_tg(f"✅ 当前 IP {current_ip} 正常（{rt}ms），无需更新。")
                 return
 
-        # 解析候选 IP
-        ips = await resolve_ips(RESOLVE_DOMAIN)
+        # 解析候选 IP - 使用改进的解析方法
+        print(f"开始解析域名: {RESOLVE_DOMAIN}")
+        ips = resolve_ips_reliable(RESOLVE_DOMAIN)
         if not ips:
-            await notify_tg("❌ 未解析到候选 IP")
+            await notify_tg(f"❌ 未从 {RESOLVE_DOMAIN} 解析到候选 IP")
             return
+
+        print(f"从 {RESOLVE_DOMAIN} 解析到 {len(ips)} 个IP: {ips}")
 
         # 并发检测候选 IP
         semaphore = asyncio.Semaphore(CONCURRENCY)
@@ -150,7 +182,7 @@ async def main():
         best_ip = min(results, key=lambda k: results[k])
         success = update_cf_dns(zone_id, record_id, best_ip)
         if success:
-            await notify_tg(f"⚡ DNS 更新成功：{RECORD_NAME} → {best_ip}")
+            await notify_tg(f"⚡ DNS 更新成功：{RECORD_NAME} → {best_ip} (来自 {RESOLVE_DOMAIN})")
         else:
             await notify_tg("❌ 更新 CF DNS 失败")
 
