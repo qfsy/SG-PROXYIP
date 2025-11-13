@@ -1,0 +1,17 @@
+{
+  "resolve_domain": "ProxyIP.SG.CMLiussss.net",
+  "check_url_template": "https://check.proxyip.cmliussss.net/check?proxyip={}",
+  "concurrency": 3,
+  "timeout_seconds": 6,
+  "retries": 2,
+  "max_response_time": 800,
+  "cloudflare": {
+    "ttl": 120,
+    "proxied": true
+  },
+  "telegram": {
+    "bot_token": "",
+    "chat_id": ""
+  }
+}
+
