@@ -2,7 +2,6 @@ import os
 import json
 import asyncio
 import aiohttp
-import socket
 import requests
 from aiohttp import ClientTimeout
 
@@ -55,29 +54,35 @@ async def check_ip(session, ip):
     if not data:
         return None
 
-    # 若返回为对象
+    # 若返回为对象而非数组
     if isinstance(data, dict):
         if data.get("success") is True and 0 < data.get("responseTime", 9999) <= MAX_RESPONSE_TIME:
             return data.get("responseTime")
         else:
             return None
 
-    # 若返回数组
+    # 若返回数组（兼容旧结构）
     if isinstance(data, list):
         for e in data:
-            if e.get("success") is True and 0 < e.get("responseTime", 9999) <= MAX_RESPONSE_TIME:
+            if e.get("success") is True and e.get("responseTime", 9999) <= MAX_RESPONSE_TIME:
                 return e.get("responseTime")
     return None
 
-def resolve_ips_socket(domain):
-    """使用系统 DNS 解析域名，只返回该域名的 IP"""
-    try:
-        _, _, ips = socket.gethostbyname_ex(domain)
-        ips = list(set(ips))[:200]
-        return ips
-    except:
-        return []
+# ---------- 修改 DNS 解析部分 ----------
+async def resolve_ips(domain):
+    """使用 Cloudflare 公共 DNS-over-HTTPS 解析 A 记录"""
+    url = f"https://cloudflare-dns.com/dns-query?name={domain}&type=A"
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, headers={'Accept':'application/dns-json'}, timeout=ClientTimeout(total=TIMEOUT)) as resp:
+                j = await resp.json()
+                if 'Answer' in j:
+                    return list(set(a['data'] for a in j['Answer']))[:200]
+        except:
+            return []
+    return []
 
+# ---------- CF 操作 ----------
 async def get_current_cf_ip():
     headers = {"Authorization": f"Bearer {CF_API_TOKEN}"}
     # 获取 zone id
@@ -121,7 +126,7 @@ async def main():
                 return
 
         # 解析候选 IP
-        ips = resolve_ips_socket(RESOLVE_DOMAIN)
+        ips = await resolve_ips(RESOLVE_DOMAIN)
         if not ips:
             await notify_tg("❌ 未解析到候选 IP")
             return
