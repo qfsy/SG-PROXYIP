@@ -1,0 +1,27 @@
+name: Update CF ProxyIP
+
+on:
+  schedule:
+    - cron: "15 * * * *"  # 每小时15分
+  workflow_dispatch:     # 支持手动触发
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.11
+      - name: Install dependencies
+        run: pip install aiohttp requests
+      - name: Run update script
+        env:
+          MAX_RESPONSE_TIME: 800
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ZONE_NAME: ${{ secrets.CF_ZONE_NAME }}
+          CF_RECORD_NAME: ${{ secrets.CF_RECORD_NAME }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: python update_cf_ip.py
