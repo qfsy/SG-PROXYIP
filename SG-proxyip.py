@@ -81,36 +81,42 @@ def resolve_ips_reliable(domain):
     except Exception as e:
         print(f"Socket解析失败: {e}")
     
-    # 方法2: 使用公共DNS解析 (Google DNS)
+    # 方法2: 使用DNS-over-HTTPS (DoH)
     try:
-        import dns.resolver
-        resolver = dns.resolver.Resolver()
-        resolver.nameservers = ['8.8.8.8', '8.8.4.4']  # Google DNS
-        answers = resolver.resolve(domain, 'A')
-        dns_ips = [str(rdata) for rdata in answers]
-        ips.extend(dns_ips)
-        print(f"DNS解析到IP: {dns_ips}")
-    except Exception as e:
-        print(f"DNS解析失败: {e}")
-        # 如果dnspython不可用，使用requests查询公共DNS API
-        try:
-            doh_url = f"https://dns.google/resolve?name={domain}&type=A"
-            response = requests.get(doh_url, timeout=TIMEOUT)
-            if response.status_code == 200:
-                data = response.json()
-                doh_ips = []
-                for answer in data.get('Answer', []):
-                    if answer.get('type') == 1:  # A record
-                        doh_ips.append(answer['data'])
-                ips.extend(doh_ips)
-                print(f"DoH解析到IP: {doh_ips}")
-        except Exception as doh_e:
-            print(f"DoH解析失败: {doh_e}")
+        doh_url = f"https://dns.google/resolve?name={domain}&type=A"
+        response = requests.get(doh_url, timeout=TIMEOUT)
+        if response.status_code == 200:
+            data = response.json()
+            doh_ips = []
+            for answer in data.get('Answer', []):
+                if answer.get('type') == 1:  # A record
+                    doh_ips.append(answer['data'])
+            ips.extend(doh_ips)
+            print(f"DoH解析到IP: {doh_ips}")
+    except Exception as doh_e:
+        print(f"DoH解析失败: {doh_e}")
     
     # 去重并限制数量
     ips = list(set(ips))[:200]
     print(f"最终解析到的IP列表: {ips}")
     return ips
+
+async def check_ip_location(session, ip):
+    """检查IP的地理位置"""
+    try:
+        # 使用ipapi.co检查IP地理位置
+        url = f"http://ipapi.co/{ip}/json/"
+        async with session.get(url, timeout=ClientTimeout(total=5)) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                country = data.get('country', '')
+                city = data.get('city', '')
+                print(f"IP {ip} 地理位置: {country}, {city}")
+                return country == 'SG'  # 新加坡的国家代码是SG
+    except Exception as e:
+        print(f"检查IP {ip} 地理位置失败: {e}")
+    
+    return False
 
 async def get_current_cf_ip():
     headers = {"Authorization": f"Bearer {CF_API_TOKEN}"}
@@ -154,35 +160,54 @@ async def main():
                 await notify_tg(f"✅ 当前 IP {current_ip} 正常（{rt}ms），无需更新。")
                 return
 
-        # 解析候选 IP - 使用改进的解析方法
+        # 使用增强的DNS解析方法
         print(f"开始解析域名: {RESOLVE_DOMAIN}")
-        ips = resolve_ips_reliable(RESOLVE_DOMAIN)
-        if not ips:
-            await notify_tg(f"❌ 未从 {RESOLVE_DOMAIN} 解析到候选 IP")
+        all_ips = resolve_ips_reliable(RESOLVE_DOMAIN)
+        
+        if not all_ips:
+            await notify_tg(f"❌ 无法从 {RESOLVE_DOMAIN} 解析到任何IP")
             return
 
-        print(f"从 {RESOLVE_DOMAIN} 解析到 {len(ips)} 个IP: {ips}")
+        print(f"成功解析到 {len(all_ips)} 个IP，开始检测响应时间和地理位置...")
 
-        # 并发检测候选 IP
+        # 并发检测候选 IP 的响应时间和地理位置
         semaphore = asyncio.Semaphore(CONCURRENCY)
         results = {}
+        sg_ips = {}
 
         async def check(ip):
             async with semaphore:
+                # 先检查响应时间
                 rt = await check_ip(session, ip)
                 if rt is not None:
                     results[ip] = rt
+                    # 如果是响应时间合格的IP，再检查地理位置
+                    is_sg = await check_ip_location(session, ip)
+                    if is_sg:
+                        sg_ips[ip] = rt
 
-        await asyncio.gather(*[check(ip) for ip in ips])
+        await asyncio.gather(*[check(ip) for ip in all_ips])
 
         if not results:
             await notify_tg("❌ 没有可用的候选 IP")
             return
 
-        best_ip = min(results, key=lambda k: results[k])
+        # 优先选择新加坡的IP
+        if sg_ips:
+            best_ip = min(sg_ips, key=lambda k: sg_ips[k])
+            best_time = sg_ips[best_ip]
+            location_info = "新加坡"
+            print(f"从 {len(sg_ips)} 个新加坡IP中选择最佳IP: {best_ip} (响应时间: {best_time}ms)")
+        else:
+            # 如果没有新加坡IP，选择所有IP中响应时间最短的
+            best_ip = min(results, key=lambda k: results[k])
+            best_time = results[best_ip]
+            location_info = "非新加坡"
+            print(f"警告: 没有找到新加坡IP，选择最佳IP: {best_ip} (响应时间: {best_time}ms)")
+        
         success = update_cf_dns(zone_id, record_id, best_ip)
         if success:
-            await notify_tg(f"⚡ DNS 更新成功：{RECORD_NAME} → {best_ip} (来自 {RESOLVE_DOMAIN})")
+            await notify_tg(f"⚡ DNS 更新成功：{RECORD_NAME} → {best_ip} ({best_time}ms) [{location_info}]")
         else:
             await notify_tg("❌ 更新 CF DNS 失败")
 
