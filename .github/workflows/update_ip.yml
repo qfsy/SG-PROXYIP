@@ -2,7 +2,7 @@ name: Update CF ProxyIP
 
 on:
   schedule:
-    - cron: "15 * * * *"  # 每小时15分
+    - cron: "15 */2 * * *"  # 每小时15分
   workflow_dispatch:     # 支持手动触发
 
 jobs:
