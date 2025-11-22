@@ -1,6 +1,6 @@
 {
   "resolve_domain": "ProxyIP.SG.CMLiussss.net",
-  "check_url_template": "https://proxyip-check.628383.xyz/check?proxyip={}&token=namegg",
+  "check_url_template": "",
   "concurrency": 3,
   "timeout_seconds": 6,
   "retries": 2,
@@ -10,4 +10,5 @@
     "proxied": false
   }
 }
+
 
