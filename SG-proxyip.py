@@ -20,7 +20,7 @@ TTL = int(cfg["cloudflare"].get("ttl", 120))
 PROXIED = cfg["cloudflare"].get("proxied", False)
 
 RESOLVE_DOMAIN = cfg["resolve_domain"]
-CHECK_URL_TEMPLATE = CHECK_URL_TEMPLATE = os.environ.get("CHECK_URL_TEMPLATE", cfg.get("check_url_template"))
+CHECK_URL_TEMPLATE = os.environ.get("CHECK_URL_TEMPLATE", cfg.get("check_url_template"))
 
 # ---------- 从 Secrets 获取敏感信息 ----------
 CF_API_TOKEN = os.environ.get("CF_API_TOKEN")
@@ -214,3 +214,4 @@ async def main():
 if __name__ == "__main__":
 
     asyncio.run(main())
+
