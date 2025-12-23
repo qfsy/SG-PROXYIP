@@ -1,18 +1,32 @@
-name: Check Cloudflare Zones
+name: Multi-Region DDNS
 
 on:
+  schedule:
+    - cron: "15 */2 * * *"   # 每两小时15 分钟执行一次
   workflow_dispatch:
 
 jobs:
-  check:
+  run:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     steps:
-      - name: Check zones via Cloudflare API
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install aiohttp requests
+
+      - name: Run DDNS
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
-          curl -s \
-            -H "Authorization: Bearer $CF_API_TOKEN" \
-            https://api.cloudflare.com/client/v4/zones \
-          | jq -r '.result[].name'
+          python main.py
