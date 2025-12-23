@@ -7,10 +7,11 @@ import requests
 from aiohttp import ClientTimeout
 
 # ================= 读取配置 =================
-CONFIG_FILE = "config.json"
+REGIONS_JSON = os.environ.get("REGIONS_JSON")
+if not REGIONS_JSON:
+    raise RuntimeError("REGIONS_JSON not set")
 
-with open(CONFIG_FILE, "r") as f:
-    cfg = json.load(f)
+cfg = json.loads(REGIONS_JSON)
 
 MAX_RESPONSE_TIME = int(cfg.get("max_response_time", 800))
 CONCURRENCY = int(cfg.get("concurrency", 4))
@@ -61,12 +62,10 @@ async def check_ip(session, ip):
 # ================= DNS 解析 =================
 def resolve_ips(domain):
     ips = set()
-
     try:
         ips.update(socket.gethostbyname_ex(domain)[2])
     except:
         pass
-
     try:
         r = requests.get(
             f"https://dns.google/resolve?name={domain}&type=A",
@@ -77,7 +76,6 @@ def resolve_ips(domain):
                 ips.add(a["data"])
     except:
         pass
-
     return list(ips)[:200]
 
 # ================= IP 国家判断 =================
@@ -133,7 +131,7 @@ def update_record(zone_id, record_id, record_name, ip):
     )
     return r.status_code == 200
 
-# ================= 单区域处理 =================
+# ================= 区域处理 =================
 async def process_region(session, name, region):
     zone_id = get_zone_id(region["zone_name"])
     if not zone_id:
@@ -171,16 +169,14 @@ async def process_region(session, name, region):
 
     return f"{name.upper()} ❌ 更新失败"
 
-# ================= 主入口（只发一条 TG） =================
+# ================= 主入口 =================
 async def main():
     if not CF_API_TOKEN:
         raise RuntimeError("CF_API_TOKEN missing")
 
     async with aiohttp.ClientSession() as session:
-        tasks = [
-            process_region(session, name, region)
-            for name, region in cfg["regions"].items()
-        ]
+        tasks = [process_region(session, name, region)
+                 for name, region in cfg["regions"].items()]
         results = await asyncio.gather(*tasks)
 
     if results:
