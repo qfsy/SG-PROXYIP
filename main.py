@@ -9,7 +9,7 @@ from aiohttp import ClientTimeout
 # ================= 读取配置 =================
 REGIONS_JSON = os.environ.get("REGIONS_JSON")
 if not REGIONS_JSON:
-    raise RuntimeError("REGIONS_JSON not set")
+    raise RuntimeError("REGIONS_JSON 环境变量未设置")
 
 cfg = json.loads(REGIONS_JSON)
 
@@ -24,6 +24,9 @@ CHECK_URL_TEMPLATE = cfg["check_url_template"]
 CF_API_TOKEN = os.environ.get("CF_API_TOKEN")
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID")
+
+if not CF_API_TOKEN:
+    raise RuntimeError("CF_API_TOKEN 环境变量未设置")
 
 # ================= Telegram =================
 async def notify_tg(message: str):
@@ -40,7 +43,7 @@ async def notify_tg(message: str):
     except:
         pass
 
-# ================= 测速 =================
+# ================= 检测域名响应 =================
 async def fetch_json(session, url):
     try:
         async with session.get(url, timeout=ClientTimeout(total=TIMEOUT)) as r:
@@ -48,8 +51,9 @@ async def fetch_json(session, url):
     except:
         return None
 
-async def check_ip(session, ip):
-    data = await fetch_json(session, CHECK_URL_TEMPLATE.format(ip))
+async def check_ip(session, target):
+    """target 可以是 IP 或域名"""
+    data = await fetch_json(session, CHECK_URL_TEMPLATE.format(target))
     if isinstance(data, dict):
         if data.get("success") and 0 < data.get("responseTime", 9999) <= MAX_RESPONSE_TIME:
             return data["responseTime"]
@@ -67,10 +71,7 @@ def resolve_ips(domain):
     except:
         pass
     try:
-        r = requests.get(
-            f"https://dns.google/resolve?name={domain}&type=A",
-            timeout=TIMEOUT
-        ).json()
+        r = requests.get(f"https://dns.google/resolve?name={domain}&type=A", timeout=TIMEOUT).json()
         for a in r.get("Answer", []):
             if a.get("type") == 1:
                 ips.add(a["data"])
@@ -81,10 +82,7 @@ def resolve_ips(domain):
 # ================= IP 国家判断 =================
 async def is_country(session, ip, country_code):
     try:
-        async with session.get(
-            f"http://ipapi.co/{ip}/json/",
-            timeout=ClientTimeout(total=5)
-        ) as r:
+        async with session.get(f"http://ipapi.co/{ip}/json/", timeout=ClientTimeout(total=5)) as r:
             if r.status == 200:
                 return (await r.json()).get("country") == country_code
     except:
@@ -131,8 +129,15 @@ def update_record(zone_id, record_id, record_name, ip):
     )
     return r.status_code == 200
 
-# ================= 区域处理 =================
+# ================= 单区域处理 =================
 async def process_region(session, name, region):
+    # ---------------- 先检测当前解析是否有效 ----------------
+    check_result = await check_ip(session, region["record_name"])
+    if check_result is not None:
+        # 检测成功且响应时间小于阈值，不更新
+        return f"{name.upper()} ⏭ {region['record_name']} 当前解析有效 ({check_result}ms)，无需更新"
+
+    # ---------------- 当前解析无效或超时，进行 DNS 更新 ----------------
     zone_id = get_zone_id(region["zone_name"])
     if not zone_id:
         return f"{name.upper()} ❌ Zone 不存在"
@@ -162,21 +167,20 @@ async def process_region(session, name, region):
         return f"{name.upper()} ❌ 记录不存在"
 
     if current_ip == best_ip:
-        return f"{name.upper()} ⏭ 未变化"
+        return f"{name.upper()} ⏭ {region['record_name']} IP 未变化"
 
     if update_record(zone_id, record_id, region["record_name"], best_ip):
         return f"{name.upper()} ✅ {region['record_name']} → {best_ip} ({valid[best_ip]}ms)"
 
     return f"{name.upper()} ❌ 更新失败"
 
-# ================= 主入口 =================
+# ================= 主入口（只发一条 TG） =================
 async def main():
-    if not CF_API_TOKEN:
-        raise RuntimeError("CF_API_TOKEN missing")
-
     async with aiohttp.ClientSession() as session:
-        tasks = [process_region(session, name, region)
-                 for name, region in cfg["regions"].items()]
+        tasks = [
+            process_region(session, name, region)
+            for name, region in cfg["regions"].items()
+        ]
         results = await asyncio.gather(*tasks)
 
     if results:
