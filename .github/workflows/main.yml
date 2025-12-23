@@ -1,8 +1,18 @@
-- name: List Cloudflare zones
-  env:
-    CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-  run: |
-    curl -s \
-      -H "Authorization: Bearer $CF_API_TOKEN" \
-      https://api.cloudflare.com/client/v4/zones \
-    | jq -r '.result[].name'
+name: Check Cloudflare Zones
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check zones via Cloudflare API
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+        run: |
+          curl -s \
+            -H "Authorization: Bearer $CF_API_TOKEN" \
+            https://api.cloudflare.com/client/v4/zones \
+          | jq -r '.result[].name'
