@@ -5,10 +5,10 @@ import aiohttp
 import socket
 import requests
 import logging
+import time
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
 from aiohttp import ClientTimeout, ClientResponseError
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 # ================= 配置日志 =================
 logging.basicConfig(
@@ -16,6 +16,39 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# ================= 重试装饰器 =================
+def retry(max_attempts=3, delay=1, backoff=2, exceptions=(Exception,)):
+    """简单的重试装饰器"""
+    def decorator(func):
+        async def async_wrapper(*args, **kwargs):
+            last_exception = None
+            for attempt in range(max_attempts):
+                try:
+                    return await func(*args, **kwargs)
+                except exceptions as e:
+                    last_exception = e
+                    if attempt < max_attempts - 1:
+                        wait_time = delay * (backoff ** attempt)
+                        logger.debug(f"尝试 {func.__name__} 失败，{wait_time}秒后重试 ({attempt+1}/{max_attempts}): {e}")
+                        await asyncio.sleep(wait_time)
+            raise last_exception or Exception(f"重试{max_attempts}次后失败")
+        
+        def sync_wrapper(*args, **kwargs):
+            last_exception = None
+            for attempt in range(max_attempts):
+                try:
+                    return func(*args, **kwargs)
+                except exceptions as e:
+                    last_exception = e
+                    if attempt < max_attempts - 1:
+                        wait_time = delay * (backoff ** attempt)
+                        logger.debug(f"尝试 {func.__name__} 失败，{wait_time}秒后重试 ({attempt+1}/{max_attempts}): {e}")
+                        time.sleep(wait_time)
+            raise last_exception or Exception(f"重试{max_attempts}次后失败")
+        
+        return async_wrapper if asyncio.iscoroutinefunction(func) else sync_wrapper
+    return decorator
 
 # ================= 配置类 =================
 @dataclass
@@ -137,10 +170,7 @@ class HealthChecker:
         return False
     
     @staticmethod
-    @retry(
-        stop=stop_after_attempt(2),
-        wait=wait_exponential(multiplier=1, min=1, max=3)
-    )
+    @retry(max_attempts=2, delay=1, backoff=2, exceptions=(aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError))
     async def check_target(session: aiohttp.ClientSession, target: str, timeout: int) -> Optional[float]:
         """检测目标（域名或IP）是否可用"""
         try:
@@ -176,7 +206,7 @@ class HealthChecker:
                     
         except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as e:
             logger.debug(f"检测失败: {masked_target}, 错误: {type(e).__name__}")
-            return None
+            raise  # 让重试装饰器处理
         
         logger.debug(f"检测未通过条件: {masked_target}")
         return None
@@ -242,12 +272,7 @@ class DNSResolver:
 class GeoLocator:
     """地理位置检测器"""
     
-    @staticmethod
-    @retry(
-        stop=stop_after_attempt(2),
-        wait=wait_exponential(multiplier=1, min=1, max=2),
-        retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError))
-    )
+    @retry(max_attempts=2, delay=1, backoff=2, exceptions=(aiohttp.ClientError, asyncio.TimeoutError))
     async def check_ip_country(
         self, 
         session: aiohttp.ClientSession, 
@@ -323,10 +348,7 @@ class CloudflareClient:
         }
         self._zone_cache: Dict[str, str] = {}
     
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=3)
-    )
+    @retry(max_attempts=3, delay=1, backoff=2, exceptions=(Exception,))
     def _make_request(self, method: str, endpoint: str, **kwargs) -> Dict:
         """发送HTTP请求"""
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
@@ -335,7 +357,7 @@ class CloudflareClient:
             method=method,
             url=url,
             headers=self.headers,
-            timeout=self.config.timeout_seconds if hasattr(self.config, 'timeout_seconds') else 10,
+            timeout=10,
             **kwargs
         )
         
