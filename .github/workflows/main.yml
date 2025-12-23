@@ -1,4 +1,4 @@
-name: Update CF ProxyIP
+name: 更新 ProxyIP 多域名
 
 on:
   # 注释掉下面 schedule 可取消定时
